@@ -172,7 +172,7 @@ The first run downloads the Whisper model (~150MB for base.en). After that, ever
 
 - [OpenAI Whisper](https://github.com/openai/whisper) — the speech recognition model
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — optimized Whisper inference
-- Built with help from [Claude](https://claude.ai) by Anthropic
+- Built by AI Breakfast with help from [Claude](https://claude.ai) by Anthropic
 
 ## License
 

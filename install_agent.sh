@@ -1,29 +1,103 @@
-#!/usr/bin/env bash
-# Install Whisper Hotkey as a macOS Login Item (Launch Agent)
+#!/bin/bash
+# ============================================================================
+# WhisperHotkey — Install Launch Agent (start on login)
+#
+# NOTE: Due to macOS permission restrictions, the recommended approach
+# is to have Terminal launch the script. This ensures Terminal's existing
+# Accessibility, Input Monitoring, and Microphone permissions are used.
+# ============================================================================
+
 set -e
 
-PLIST_SRC="$(cd "$(dirname "$0")" && pwd)/com.jeffstelle.whisperhotkey.plist"
-PLIST_DEST="$HOME/Library/LaunchAgents/com.jeffstelle.whisperhotkey.plist"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
-echo "=== Installing Whisper Hotkey Launch Agent ==="
+LABEL="com.whisperhotkey.launcher"
+PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-# Stop existing agent if running
-launchctl unload "$PLIST_DEST" 2>/dev/null || true
+# ── Create the wrapper app ────────────────────────────────────────────────
+echo "Creating WhisperHotkey launcher app..."
 
-# Copy plist to LaunchAgents
-cp "$PLIST_SRC" "$PLIST_DEST"
+APP_DIR="$SCRIPT_DIR/WhisperHotkey.app/Contents/MacOS"
+mkdir -p "$APP_DIR"
 
-# Load it
-launchctl load "$PLIST_DEST"
+cat > "$APP_DIR/WhisperHotkey" << APPEOF
+#!/bin/bash
+osascript -e '
+tell application "Terminal"
+    activate
+    do script "cd \"$SCRIPT_DIR\" && source .venv/bin/activate && python whisper_hotkey.py"
+end tell
+'
+APPEOF
 
+chmod +x "$APP_DIR/WhisperHotkey"
+
+# ── Create Info.plist for the app ─────────────────────────────────────────
+cat > "$SCRIPT_DIR/WhisperHotkey.app/Contents/Info.plist" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>WhisperHotkey</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisperhotkey.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>
+PLISTEOF
+
+echo "✓ Created WhisperHotkey.app"
+
+# ── Create Launch Agent ───────────────────────────────────────────────────
+mkdir -p "$HOME/Library/LaunchAgents"
+
+cat > "$PLIST_PATH" << LAEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>open</string>
+        <string>$SCRIPT_DIR/WhisperHotkey.app</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>$SCRIPT_DIR/whisper_hotkey.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>$SCRIPT_DIR/whisper_hotkey.log</string>
+</dict>
+</plist>
+LAEOF
+
+launchctl load "$PLIST_PATH" 2>/dev/null || true
+
+echo "✓ Launch agent installed"
 echo ""
-echo "Done! Whisper Hotkey will now start automatically on login."
+echo "============================================"
+echo "  WhisperHotkey will now start on login!"
+echo "============================================"
 echo ""
-echo "IMPORTANT — grant Accessibility permission to the Python binary:"
-echo "  1. System Settings → Privacy & Security → Accessibility"
-echo "  2. Click + and navigate to:"
-echo "     /Users/jeffstelle/Claude Project/.venv/bin/python3.9"
-echo "  3. Toggle it ON"
+echo "A Terminal window will open with the script"
+echo "running when you log in."
 echo ""
-echo "Check logs at: /Users/jeffstelle/Claude Project/whisper_hotkey.log"
-echo "To stop:       ./uninstall_agent.sh"
+echo "IMPORTANT: Make sure Terminal has these permissions"
+echo "in System Settings → Privacy & Security:"
+echo "  • Accessibility  → Terminal ON"
+echo "  • Input Monitoring → Terminal ON"
+echo "  • Microphone → Terminal ON"
+echo ""
+echo "To remove: ./uninstall_agent.sh"
+echo "============================================"

@@ -1,6 +1,15 @@
-#!/usr/bin/env bash
-# Remove Whisper Hotkey Launch Agent
-PLIST_DEST="$HOME/Library/LaunchAgents/com.jeffstelle.whisperhotkey.plist"
+#!/bin/bash
+# ============================================================================
+# WhisperHotkey — Uninstall Launch Agent (remove from startup)
+# ============================================================================
 
-launchctl unload "$PLIST_DEST" 2>/dev/null && echo "Agent stopped." || echo "Agent was not running."
-rm -f "$PLIST_DEST" && echo "Agent removed. It will no longer start on login."
+LABEL="com.whisperhotkey.launcher"
+PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+if [ -f "$PLIST_PATH" ]; then
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    rm "$PLIST_PATH"
+    echo "✓ Launch agent removed. WhisperHotkey will no longer start on login."
+else
+    echo "Launch agent not found — nothing to remove."
+fi

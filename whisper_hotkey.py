@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Whisper Hotkey — Local speech-to-text via OpenAI Whisper.
+WhisperHotkey — Local speech-to-text via faster-whisper.
 
 Usage:
   Hold RIGHT OPTION (⌥) to record. Release to transcribe and paste.
@@ -13,6 +13,8 @@ import sys
 import threading
 import tempfile
 import wave
+import subprocess
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -24,129 +26,149 @@ from faster_whisper import WhisperModel
 # Hotkey to hold while speaking. Common choices:
 #   keyboard.Key.alt_r      → Right Option  (default)
 #   keyboard.Key.f13        → F13 key
-#   keyboard.Key.scroll_lock → Scroll Lock
+#   keyboard.Key.cmd_r      → Right Command key
 HOTKEY = keyboard.Key.alt_r
 
 # Whisper model size. Larger = more accurate but slower to load/transcribe.
-#   "tiny.en"   ~39 MB  — fastest, lower accuracy
-#   "base.en"   ~74 MB  — good balance  ← default
-#   "small.en"  ~244 MB — better accuracy, ~2-3x slower
-#   "medium.en" ~769 MB — near-human accuracy, slow on CPU
+# Options: "tiny.en", "base.en", "small.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"
+# The ".en" variants are English-only and faster. Remove ".en" for multilingual support.
 MODEL_SIZE = "base.en"
 
-# Set to a specific language code (e.g. "en", "es", "fr") or None for auto-detect
-LANGUAGE = "en"
+# Audio settings
+SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
 
-# After transcribing, automatically paste at the cursor using Cmd+V
-AUTO_PASTE = True
+# ── Globals ────────────────────────────────────────────────────────────────────
 
-SAMPLE_RATE = 16000
-CHANNELS = 1
+recording = False
+audio_frames = []
+stream = None
+model = None
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ── Functions ──────────────────────────────────────────────────────────────────
 
-_recording = False
-_audio_chunks: list = []
-_lock = threading.Lock()
-_model = None
-
-
-def _load_model() -> None:
-    global _model
+def load_model():
+    """Load the Whisper model."""
+    global model
     print(f"Loading Whisper '{MODEL_SIZE}' model (first run downloads it)...")
-    _model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
-    print(f"Ready.  Hold {HOTKEY} to record, release to transcribe and paste.")
-    print("Press Ctrl+C to quit.\n")
+    model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+    print("Ready.  Hold Key.alt_r to record, release to transcribe and paste.")
+    print("Press Ctrl+C to quit.")
+    print()
 
 
-def _audio_callback(indata, frames, time_info, status) -> None:
-    if _recording:
-        _audio_chunks.append(indata.copy())
+def paste_text(text):
+    """Paste text at the current cursor position using macOS clipboard + Cmd+V."""
+    process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+    process.communicate(text.encode("utf-8"))
+    
+    # Small delay to ensure clipboard is set
+    time.sleep(0.05)
+    
+    # Simulate Cmd+V to paste
+    script = '''
+    tell application "System Events"
+        keystroke "v" using command down
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
-def _transcribe_and_paste() -> None:
-    with _lock:
-        if not _audio_chunks:
-            return
-        audio = np.concatenate(_audio_chunks, axis=0).flatten()
-        _audio_chunks.clear()
+def start_recording():
+    """Start recording audio from the microphone."""
+    global recording, audio_frames, stream
+    audio_frames = []
+    recording = True
 
-    # Skip clips shorter than 0.3 s (accidental keypresses)
-    if len(audio) < SAMPLE_RATE * 0.3:
-        print("(too short, ignoring)")
-        return
-
-    # Write to a temp WAV file
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        tmp_path = f.name
-
-    with wave.open(tmp_path, "w") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes((audio * 32767).astype(np.int16).tobytes())
-
-    print("Transcribing...", end=" ", flush=True)
-    segments, _ = _model.transcribe(
-        tmp_path,
-        language=LANGUAGE,
-        vad_filter=True,           # skip silent regions
-        vad_parameters={"min_silence_duration_ms": 300},
-    )
-    text = " ".join(s.text.strip() for s in segments).strip()
-    os.unlink(tmp_path)
-
-    if not text:
-        print("(no speech detected)")
-        return
-
-    print(f'"{text}"')
-
-    # Copy to clipboard
-    import subprocess
-    proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-    proc.communicate(text.encode("utf-8"))
-
-    if AUTO_PASTE:
-        # Paste at the current cursor position
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to keystroke "v" using command down',
-        ], check=False)
-
-
-def _on_press(key) -> None:
-    global _recording
-    if key == HOTKEY and not _recording:
-        _recording = True
-        print("● Recording...", end=" ", flush=True)
-
-
-def _on_release(key) -> None:
-    global _recording
-    if key == HOTKEY and _recording:
-        _recording = False
-        print("■ Stopped.")
-        threading.Thread(target=_transcribe_and_paste, daemon=True).start()
-
-
-def main() -> None:
-    _load_model()
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(f"  (audio status: {status})", file=sys.stderr)
+        if recording:
+            audio_frames.append(indata.copy())
 
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
+        channels=1,
         dtype="float32",
-        callback=_audio_callback,
-        blocksize=1024,
+        callback=callback,
     )
+    stream.start()
+    print("● Recording...", end=" ", flush=True)
+
+
+def stop_and_transcribe():
+    """Stop recording and transcribe the audio."""
+    global recording, stream
+    recording = False
+
+    if stream:
+        stream.stop()
+        stream.close()
+        stream = None
+
+    print("■ Stopped.")
+
+    if not audio_frames:
+        print("(no audio captured)")
+        return
+
+    # Combine all audio frames
+    audio_data = np.concatenate(audio_frames, axis=0).flatten()
+
+    # Skip very short recordings (< 0.3 seconds)
+    if len(audio_data) < SAMPLE_RATE * 0.3:
+        print("(too short)")
+        return
+
+    # Save to temporary WAV file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes((audio_data * 32767).astype(np.int16).tobytes())
 
     try:
-        with stream:
-            with keyboard.Listener(on_press=_on_press, on_release=_on_release) as listener:
-                listener.join()
-    except KeyboardInterrupt:
-        print("\nBye.")
+        print("Transcribing...", end=" ", flush=True)
+        segments, info = model.transcribe(tmp_path, beam_size=5)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        if text:
+            print(f'"{text}"')
+            paste_text(text)
+        else:
+            print("(no speech detected)")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+    finally:
+        os.unlink(tmp_path)
+
+
+# ── Hotkey Listener ────────────────────────────────────────────────────────────
+
+def on_press(key):
+    """Handle key press events."""
+    global recording
+    if key == HOTKEY and not recording:
+        start_recording()
+
+
+def on_release(key):
+    """Handle key release events."""
+    if key == HOTKEY and recording:
+        threading.Thread(target=stop_and_transcribe, daemon=True).start()
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def main():
+    load_model()
+
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        try:
+            listener.join()
+        except KeyboardInterrupt:
+            print("\nQuitting.")
 
 
 if __name__ == "__main__":
